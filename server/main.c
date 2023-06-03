@@ -1,10 +1,10 @@
+#include <endian.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "common.h"
 #include "network.h"
-
-const int SCMDLEN = 4;
 
 int main(int argc, char** argv) {
     if (argc != 2) {
@@ -15,9 +15,9 @@ int main(int argc, char** argv) {
     printf("Acquiring socket...\n");
     fflush(stdout);
     int sockfd;
-    char buffer[128];
-    if (!acquire_tcp_listening_socket(argv[1], &sockfd, buffer, sizeof(buffer))) {
-        printf("Failed to acquire socket : %s\n", buffer);
+    char error_message_buffer[128];
+    if (!acquire_tcp_listening_socket(argv[1], &sockfd, error_message_buffer, sizeof(error_message_buffer))) {
+        printf("Failed to acquire socket : %s\n", error_message_buffer);
         FLUSH_STDOUT_EXIT(1);
     }
     printf("Success! Socket fd : %d\n", sockfd);
@@ -39,8 +39,7 @@ int main(int argc, char** argv) {
         printf("Accepted a conection from user. fd : %d\n", usr);
         fflush(stdout);
         // then we have a user. Interact until EOF
-        bool finished = false;
-        while (!finished) {
+        while (true) {
             // interaction protocol is the following:
             // [main cmd] - 4 bytes. Symbolic. First byte also indicates thansmission mode for length
             // s = symbolic
@@ -48,34 +47,42 @@ int main(int argc, char** argv) {
             // [length of command + args block] - 8 bytes. network endianness
             // [command + args] - variable length.
             char server_cmd[SCMDLEN + 1];
-            int total_read = 0;
-            while (total_read < SCMDLEN) {
-                errno = 0;
-                int64_t cur = read(usr, server_cmd + total_read, SCMDLEN - total_read);
-                if (cur == 0) {
-                    printf("User disconnected. Closing fd : %d...\n", usr);
-                    fflush(stdout);
-                    close(usr);
-                    usr = -1;
-                    // disconnect;
-                    finished = true;
-                    break;
-                }
-                if (errno == EINTR) {
-                    continue;
-                }
-                if (errno != 0) {
-                    printf("Encountered an error while reading from socket : %s", strerror(errno));
-                    memset(server_cmd, 0, sizeof(server_cmd));
-                    break;
-                }
-                total_read += cur;
+            if (!read_n_bytes_from_socket_fd(usr, server_cmd, SCMDLEN, error_message_buffer, sizeof(error_message_buffer))) {
+                close(usr);
+                usr = -1;
+                printf("Failed to retrieve cmd : %s\n", error_message_buffer);
+                fflush(stdout);
+                break;
             }
-            if (finished) continue;
             server_cmd[SCMDLEN] = '\0';
             if (!strcmp("spwn", server_cmd)) {
                 // it's a spawn command!
                 printf("recognized a spawn command!\n");
+                // now I need to receive a big-endian int64_t
+                int64_t be64_payload_length;
+                if (!read_n_bytes_from_socket_fd(usr, &be64_payload_length, sizeof(be64_payload_length), error_message_buffer, sizeof(error_message_buffer))) {
+                    close(usr);
+                    usr = -1;
+                    printf("Failed to retrieve payload size : %s\n", error_message_buffer);
+                    fflush(stdout);
+                    break;
+                }
+                printf("Received a big-endian integer %lx\n", be64_payload_length);
+                fflush(stdout);
+                int64_t payload_length = be64toh(be64_payload_length);
+                printf("Number is %ld\n", payload_length);
+                fflush(stdout);
+                char* command = calloc(payload_length, 1);
+                if (!read_n_bytes_from_socket_fd(usr, command, payload_length, error_message_buffer, sizeof(error_message_buffer))) {
+                    close(usr);
+                    usr = -1;
+                    printf("Failed to retrieve payload size : %s\n", error_message_buffer);
+                    fflush(stdout);
+                    break;
+                }
+                printf("Received the payload : '%s'\n", command);
+                fflush(stdout);
+                free(command);
             }
             else {
                 printf("Unknown cmd : %s\n", server_cmd);

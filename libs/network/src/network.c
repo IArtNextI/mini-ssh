@@ -91,3 +91,47 @@ bool acquire_tcp_client_socket(const char* host, const char* port, int* sock_fd,
     *sock_fd = sfd;
     return true;
 }
+
+bool read_n_bytes_from_socket_fd(int fd, void* buffer, size_t bytes, char* error_message, size_t max_error_message_len) {
+    size_t total_read = 0;
+    while (total_read < bytes) {
+        errno = 0;
+        int64_t cur = read(fd, buffer + total_read, bytes - total_read);
+        if (cur == 0) {
+            snprintf(error_message, max_error_message_len, "Peer disconnected.");
+            memset(buffer, 0, bytes);
+            return false;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno != 0) {
+            snprintf(error_message, max_error_message_len, "Encountered an error while reading from socket : %s", strerror(errno));
+            return false;
+        }
+        total_read += cur;
+    }
+    return true;
+}
+
+bool write_n_bytes_to_socket_fd(int fd, void* buffer, size_t bytes, char* error_message, size_t max_error_message_len) {
+    int64_t written = 0;
+    while (written < bytes) {
+        errno = 0;
+        int64_t cur = write(fd, buffer + written, bytes - written);
+        if (cur == 0) {
+            snprintf(error_message, max_error_message_len, "Unexpected EOF");
+            return false;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno != 0) {
+            snprintf(error_message, max_error_message_len, "Encountered an error while writing to socket : %s", strerror(errno));
+            return false;
+        }
+        written += cur;
+    }
+    return true;
+}
+

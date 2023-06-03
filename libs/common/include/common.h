@@ -24,4 +24,6 @@
     fflush(stdout);                 \
     exit(ret_code);
 
-int gcd(int a, int b);
+#define SCMDLEN 4
+#define SCMDLENLEN 8
+#define SCMDSPAWN "spwn"
