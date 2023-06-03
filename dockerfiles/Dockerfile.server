@@ -1,0 +1,5 @@
+FROM ubuntu:20.04
+
+WORKDIR /server
+COPY --from=mini-ssh-build:latest /minissh/build/server/server .
+EXPOSE 42069

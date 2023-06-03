@@ -1,0 +1,10 @@
+version: '3'
+
+services:
+  server:
+    image: mini-ssh-server:latest
+    command: /server/server 42069
+    expose:
+      - "42069"
+    ports:
+      - "42069:42069"

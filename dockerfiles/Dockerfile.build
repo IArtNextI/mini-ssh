@@ -1,0 +1,5 @@
+FROM mini-ssh-base:latest
+
+WORKDIR /minissh
+COPY . /minissh
+RUN cmake -B build && cd build && make
