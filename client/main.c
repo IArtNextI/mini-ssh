@@ -2,9 +2,28 @@
 #include "network.h"
 #include <endian.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+
+void* run(void* arg) {
+    int read_fd = *(int*)arg;
+    char buffer[4096];
+    char error_message_buffer[128];
+    while (true) {
+        int rs = read(read_fd, &buffer, sizeof(buffer));
+        if (rs > 0) {
+            if (!write_n_bytes_to_socket_fd(STDOUT_FILENO, buffer, rs, error_message_buffer, sizeof(error_message_buffer))) {
+                printf("Failed to pass server out to STDOUT\n");
+                exit(1);
+            }
+        }
+        if (rs == 0) {
+            break;
+        }
+    }
+}
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -45,7 +64,7 @@ int main(int argc, char** argv) {
 
         int64_t written = 0;
         for (int i = 3; i < argc; ++i) {
-            snprintf(payload + SCMDLEN + SCMDLENLEN + written, length_of_message - SCMDLEN - SCMDLENLEN - written, "%s ", argv[i]);
+            snprintf(payload + SCMDLEN + SCMDLENLEN + written, length_of_message - SCMDLEN - SCMDLENLEN - written, "%s", argv[i]);
             written += strlen(argv[i]) + 1;
         }
         payload[length_of_message - 1] = '\0';
@@ -60,6 +79,56 @@ int main(int argc, char** argv) {
         }
         else {
             printf("Successfully transferred the payload to server\n");
+        }
+        // now I need to reopen fds for STDIN and STDOUT
+        // TODO : STDERR also
+        // TODO : move this up? pretty far into a process to do things independently of network
+        //        interaction logic
+
+        // int sock_fd2;
+        // errno = 0;
+        // if ((sock_fd2 = dup(sock_fd)) < 0) {
+        //     printf("Failed to duplicate socket fd : %s\n", strerror(errno));
+        //     return 1;
+        // }
+
+        // plan is the following:
+
+        // errno = 0;
+        // if (dup2(sock_fd, STDIN_FILENO) < 0) {
+        //     printf("Failed to reopen socket fd as STDIN : %s\n", strerror(errno));
+        //     return 1;
+        // }
+
+        // errno = 0;
+        // if (dup2(sock_fd2, STDOUT_FILENO) < 0) {
+        //     printf("Failed to reopen socket fd as STDOUT : %s\n", strerror(errno));
+        //     return 1;
+        // }
+
+        // if (fcntl(sock_fd, F_SETFL, fcntl(sock_fd, F_GETFL, 0) | O_NONBLOCK) < 0) {
+        //     printf("Failed to set socket fd nonblocking\n");
+        //     return 1;
+        // }
+
+        pthread_t server_reader_thread;
+
+        if (pthread_create(&server_reader_thread, NULL, run, &sock_fd) != 0) {
+            printf(("Failed to create server reader thread.\n"));
+            return 1;
+        }
+
+        char buffer[4096];
+        while (true) {
+            int r = read(STDIN_FILENO, buffer, sizeof(buffer));
+            if (r > 0) {
+                if (!write_n_bytes_to_socket_fd(sock_fd, buffer, r, error_message_buffer, sizeof(error_message_buffer))) {
+                    printf("Failed to pass the read byte : %s\n", error_message_buffer);
+                }
+            }
+            if (r == 0) {
+                break;
+            }
         }
 
         free(payload);

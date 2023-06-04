@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #define FLUSH_STDOUT_EXIT(ret_code) \
