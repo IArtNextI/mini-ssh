@@ -1,14 +1,17 @@
+#include <asm-generic/errno-base.h>
 #include <endian.h>
 #include <errno.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include "common.h"
 #include "network.h"
 #include "proto.h"
 
-bool launch_spawn_cmd(int read_fd, int write_fd, char* payload, int64_t payload_length, pid_t* child_pid, char* error_message, size_t max_error_message_len) {
+bool launch_spawn_cmd(int read_fd, int close_fd, int write_fd, char* payload, int64_t payload_length, pid_t* child_pid, char* error_message, size_t max_error_message_len) {
     errno = 0;
     pid_t pid = fork();
 
@@ -17,6 +20,7 @@ bool launch_spawn_cmd(int read_fd, int write_fd, char* payload, int64_t payload_
         return false;
     }
     else if (pid == 0) {
+        close(close_fd);
         // child
         int argcc = 0;
         for (int i = 0; i < payload_length; ++i) {
@@ -72,6 +76,11 @@ int main(int argc, char** argv) {
         FLUSH_STDOUT_EXIT(1);
     }
     printf("Starting daemon on port %s...\n", argv[1]);
+    // TODO : UNCOMMENT
+    // if (daemon(1, 1) != 0) {
+    //     printf("Failed to start the daemon\n");
+    //     FLUSH_STDOUT_EXIT(1);
+    // }
     printf("Acquiring socket...\n");
     fflush(stdout);
     int sockfd;
@@ -125,34 +134,61 @@ int main(int argc, char** argv) {
             message msg;
             if (!retrieve_message_from_socket(usr, &msg, error_message_buffer, sizeof(error_message_buffer))) {
                 printf("Failed to retrieve message from socket : %s\n", error_message_buffer);
+                close(pipe_fds[0]);
+                close(pipe_fds[1]);
                 _exit(1);
             }
             // now I need to clear msg.payload whenever I finish the work
-            if (!strcmp("spwn", msg.cmd)) {
+            if (!strncmp("spwn", msg.cmd, SCMDLEN)) {
                 printf("recognized a spawn payload!\n");
                 fflush(stdout);
                 pid_t child_pid;
-                if (!launch_spawn_cmd(pipe_fds[0], usr, msg.payload, msg.payload_length, &child_pid, error_message_buffer, sizeof(error_message_buffer))) {
+                if (!launch_spawn_cmd(pipe_fds[0], pipe_fds[1], usr, msg.payload, msg.payload_length, &child_pid, error_message_buffer, sizeof(error_message_buffer))) {
                     printf("Failed to lauch a spawn command\n");
+                    close(pipe_fds[0]);
+                    close(pipe_fds[1]);
                     _exit(1);
                 }
+                close(pipe_fds[0]);
+                message msg;
                 while (true) {
-                    char buffer[4096];
-                    while (true) {
-                        errno = 0;
-                        int rs = read(usr, &buffer, sizeof(buffer));
-                        if (rs <= 0 && errno != EINTR) {
-                            break;
-                        }
-                        if (rs > 0) {
-                            if (!write_n_bytes_to_socket_fd(pipe_fds[1], buffer, rs, error_message_buffer, sizeof(error_message_buffer))) {
-                                printf("Failed to pass server out to STDOUT\n");
-                                _exit(1);
-                            }
+                    if (!retrieve_message_from_socket(usr, &msg, error_message_buffer, sizeof(error_message_buffer))) {
+                        printf("Failed to retrieve message from socket : %s\n", error_message_buffer);
+                        break;
+                    }
+                    printf("Received a message with header: %c%c%c%c\n", msg.cmd[0], msg.cmd[1], msg.cmd[2], msg.cmd[3]);
+                    if (!strncmp(msg.cmd, "data", SCMDLEN)) {
+                        if (!write_n_bytes_to_socket_fd(pipe_fds[1], msg.payload, msg.payload_length, error_message_buffer, sizeof(error_message_buffer))) {
+                            printf("Failed to pass server out to STDOUT\n");
+                            close(pipe_fds[0]);
+                            close(pipe_fds[1]);
+                            _exit(1);
                         }
                     }
+                    else if (!strncmp(msg.cmd, "sign", SCMDLEN)) {
+                        if (!strncmp(msg.payload, "SIGINT", 6)) {
+                            // send SIGINT
+                            if (kill(child_pid, SIGINT)) {
+                                printf("Failed to send SIGINT to child process\n");
+                            }
+                            close(pipe_fds[0]);
+                            close(pipe_fds[1]);
+                            break;
+                        }
+                    }
+
+                    free(msg.payload);
                 }
                 printf("Exited reader loop\n");
+                shutdown(pipe_fds[1], SHUT_WR);
+                close(pipe_fds[1]);
+                int status;
+                if (waitpid(child_pid, &status, 0) != child_pid) {
+                    printf("Failed to await the runner process with pid = %d\n", child_pid);
+                }
+                else {
+                    printf("Successfully terminated the runner process with pid = %d\n", child_pid);
+                }
             }
             else {
                 printf("Unknown cmd : %s\n", msg.cmd);

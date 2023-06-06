@@ -1,8 +1,11 @@
 #include "common.h"
 #include "network.h"
+#include <bits/types/sigset_t.h>
 #include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,18 +26,47 @@ void* run(void* arg) {
                 exit(1);
             }
         }
-        if (rs == 0) {
+        if (rs <= 0) {
             break;
         }
     }
+    printf("Exited from the server-reader loop\n");
     pthread_exit(NULL);
 }
+
+sig_atomic_t sigint_in = 0;
+
+void handle(int x) {
+    sigint_in = 1;
+}
+
+
 
 int main(int argc, char** argv) {
     if (argc < 3) {
         printf("Usage : %s <server-address> <cmd>", argv[0]);
         FLUSH_STDOUT_EXIT(1);
     }
+    struct sigaction sa;
+    sa.sa_handler = handle;
+    if (sigaction(SIGINT, &sa, NULL)) {
+        printf("Failed to set SIGINT handler\n");
+        FLUSH_STDOUT_EXIT(1);
+    }
+    sigset_t sigset;
+    if (sigemptyset(&sigset)) {
+        printf("Failed to clear sigset\n");
+        FLUSH_STDOUT_EXIT(1);
+    }
+    if (sigaddset(&sigset, SIGINT)) {
+        printf("Failed to add SIGINT to sigset\n");
+        FLUSH_STDOUT_EXIT(1);
+    }
+    if (sigprocmask(SIG_UNBLOCK, &sigset, NULL)) {
+        printf("Failed to add SIGINT to sigset\n");
+        FLUSH_STDOUT_EXIT(1);
+    }
+
     // argv[1] is of format ip:port
     const char* ip = argv[1];
     const char* port = "-1";
@@ -80,8 +112,10 @@ int main(int argc, char** argv) {
 
         if (!send_message_through_socket(sock_fd, &msg, error_message_buffer, sizeof(error_message_buffer))) {
             printf("Failed to send message to server : %s", error_message_buffer);
+            free(msg.payload);
             FLUSH_STDOUT_EXIT(1);
         }
+        free(msg.payload);
 
         pthread_t server_reader_thread;
 
@@ -91,21 +125,60 @@ int main(int argc, char** argv) {
         }
 
         char buffer[4096];
+        char signal_buffer[10];
         while (true) {
             int r = read(STDIN_FILENO, buffer, sizeof(buffer));
+            if (sigprocmask(SIG_BLOCK, &sigset, NULL)) {
+                printf("Failed to block SIGINT\n");
+                FLUSH_STDOUT_EXIT(1);
+            }
             if (r > 0) {
-                if (!write_n_bytes_to_socket_fd(sock_fd, buffer, r, error_message_buffer, sizeof(error_message_buffer))) {
-                    printf("Failed to pass the read byte : %s\n", error_message_buffer);
+                message msg;
+                msg.cmd[0] = 'd';
+                msg.cmd[1] = 'a';
+                msg.cmd[2] = 't';
+                msg.cmd[3] = 'a';
+                msg.payload_length = r;
+                msg.payload = buffer;
+                if (!send_message_through_socket(sock_fd, &msg, error_message_buffer, sizeof(error_message_buffer))) {
+                    printf("Failed to pass the message : %s\n", error_message_buffer);
                 }
+            }
+            if (sigint_in) {
+                message msg;
+                msg.cmd[0] = 's';
+                msg.cmd[1] = 'i';
+                msg.cmd[2] = 'g';
+                msg.cmd[3] = 'n';
+                msg.payload_length = 6;
+                signal_buffer[0] = 'S';
+                signal_buffer[1] = 'I';
+                signal_buffer[2] = 'G';
+                signal_buffer[3] = 'I';
+                signal_buffer[4] = 'N';
+                signal_buffer[5] = 'T';
+                msg.payload = signal_buffer;
+                if (!send_message_through_socket(sock_fd, &msg, error_message_buffer, sizeof(error_message_buffer))) {
+                    printf("Failed to pass the message : %s\n", error_message_buffer);
+                }
+                sigint_in = 0;
+                break;
             }
             if (r == 0) {
                 break;
             }
+            if (sigprocmask(SIG_UNBLOCK, &sigset, NULL)) {
+                printf("Failed to unblock SIGINT\n");
+                FLUSH_STDOUT_EXIT(1);
+            }
         }
-        printf("Exited from the reader loop\n");
+        printf("Exited from the user-reader loop\n");
         errno = 0;
-        if (shutdown(sock_fd, SHUT_RDWR)) {
+        if (shutdown(sock_fd, SHUT_WR)) {
             printf("Failed to shutdown the socket : %s\n", strerror(errno));
+        }
+        if (pthread_join(server_reader_thread, NULL)) {
+            printf("Failed to join thread\n");
         }
     }
     else {
