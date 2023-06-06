@@ -3,9 +3,13 @@
 #include <endian.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
+#include "proto.h"
 
 void* run(void* arg) {
     int read_fd = *(int*)arg;
@@ -23,6 +27,7 @@ void* run(void* arg) {
             break;
         }
     }
+    pthread_exit(NULL);
 }
 
 int main(int argc, char** argv) {
@@ -53,63 +58,30 @@ int main(int argc, char** argv) {
         for (int i = 3; i < argc; ++i) {
             length_of_payload += strlen(argv[i]) + 1;
         }
-        int64_t length_of_message = SCMDLEN + SCMDLENLEN + length_of_payload;
-        char* payload = calloc(length_of_message, 1);
 
-        snprintf(payload, length_of_message, SCMDSPAWN);
-
-        int64_t length_of_payload_be64 = htobe64(length_of_payload);
-
-        memcpy(payload + SCMDLEN, &length_of_payload_be64, sizeof(length_of_payload_be64));
+        message msg;
+        msg.cmd[0] = 's';
+        msg.cmd[1] = 'p';
+        msg.cmd[2] = 'w';
+        msg.cmd[3] = 'n';
+        msg.payload_length = length_of_payload;
+        msg.payload = calloc(length_of_payload, 1);
 
         int64_t written = 0;
         for (int i = 3; i < argc; ++i) {
-            snprintf(payload + SCMDLEN + SCMDLENLEN + written, length_of_message - SCMDLEN - SCMDLENLEN - written, "%s", argv[i]);
+            snprintf(msg.payload + written, length_of_payload - SCMDLEN - sizeof(int64_t) - written, "%s", argv[i]);
             written += strlen(argv[i]) + 1;
         }
-        payload[length_of_message - 1] = '\0';
+        msg.payload[length_of_payload - 1] = '\0';
 
-        printf("%ld %ld\n", length_of_message, length_of_payload);
-        for (int i = 0; i < length_of_message; ++i) {
-            printf("%d %c\n", payload[i], payload[i]);
+        for (int i = 0; i < msg.payload_length; ++i) {
+            printf("%d %c\n", msg.payload[i], msg.payload[i]);
         }
 
-        if (!write_n_bytes_to_socket_fd(sock_fd, payload, length_of_message, error_message_buffer, sizeof(error_message_buffer))) {
-            printf("Failed to send the message to server : %s", error_message_buffer);
+        if (!send_message_through_socket(sock_fd, &msg, error_message_buffer, sizeof(error_message_buffer))) {
+            printf("Failed to send message to server : %s", error_message_buffer);
+            FLUSH_STDOUT_EXIT(1);
         }
-        else {
-            printf("Successfully transferred the payload to server\n");
-        }
-        // now I need to reopen fds for STDIN and STDOUT
-        // TODO : STDERR also
-        // TODO : move this up? pretty far into a process to do things independently of network
-        //        interaction logic
-
-        // int sock_fd2;
-        // errno = 0;
-        // if ((sock_fd2 = dup(sock_fd)) < 0) {
-        //     printf("Failed to duplicate socket fd : %s\n", strerror(errno));
-        //     return 1;
-        // }
-
-        // plan is the following:
-
-        // errno = 0;
-        // if (dup2(sock_fd, STDIN_FILENO) < 0) {
-        //     printf("Failed to reopen socket fd as STDIN : %s\n", strerror(errno));
-        //     return 1;
-        // }
-
-        // errno = 0;
-        // if (dup2(sock_fd2, STDOUT_FILENO) < 0) {
-        //     printf("Failed to reopen socket fd as STDOUT : %s\n", strerror(errno));
-        //     return 1;
-        // }
-
-        // if (fcntl(sock_fd, F_SETFL, fcntl(sock_fd, F_GETFL, 0) | O_NONBLOCK) < 0) {
-        //     printf("Failed to set socket fd nonblocking\n");
-        //     return 1;
-        // }
 
         pthread_t server_reader_thread;
 
@@ -130,8 +102,11 @@ int main(int argc, char** argv) {
                 break;
             }
         }
-
-        free(payload);
+        printf("Exited from the reader loop\n");
+        errno = 0;
+        if (shutdown(sock_fd, SHUT_RDWR)) {
+            printf("Failed to shutdown the socket : %s\n", strerror(errno));
+        }
     }
     else {
         printf("Unknown command : %s", argv[2]);

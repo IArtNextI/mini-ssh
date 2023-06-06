@@ -26,5 +26,4 @@
     exit(ret_code);
 
 #define SCMDLEN 4
-#define SCMDLENLEN 8
 #define SCMDSPAWN "spwn"
