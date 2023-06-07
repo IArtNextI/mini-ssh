@@ -11,6 +11,12 @@
 #include "network.h"
 #include "proto.h"
 
+sig_atomic_t terminated = 0;
+
+void handle(int x) {
+    terminated = 1;
+}
+
 bool launch_spawn_cmd(int read_fd, int close_fd, int write_fd, char* payload, int64_t payload_length, pid_t* child_pid, char* error_message, size_t max_error_message_len) {
     errno = 0;
     pid_t pid = fork();
@@ -40,16 +46,18 @@ bool launch_spawn_cmd(int read_fd, int close_fd, int write_fd, char* payload, in
         fflush(stdout);
         for (int64_t i = 0; i < payload_length; ++i) {
             if (i == 0 || i > 0 && payload[i - 1] == '\0') {
-                // TODO : once again I met the separator.
-                // The correct way to handle it is to pass the number of args + lengths in the message
                 argvv[cnt++] = &payload[i];
                 printf("%s\n", argvv[cnt - 1]);
             }
         }
-
-        // TODO : also stderr
         if (dup2(read_fd, STDIN_FILENO) < 0) {
             printf("Falied to reopen the usr fd as STDIN\n");
+            fflush(stdout);
+            _exit(1);
+        }
+        int err_fd = dup(write_fd);
+        if (err_fd < 0) {
+            printf("Falied to call 'dup' on write fd\n");
             fflush(stdout);
             _exit(1);
         }
@@ -58,6 +66,12 @@ bool launch_spawn_cmd(int read_fd, int close_fd, int write_fd, char* payload, in
             fflush(stdout);
             _exit(1);
         }
+        if (dup2(err_fd, STDERR_FILENO) < 0) {
+            printf("Falied to reopen the usr fd as STDOUT\n");
+            fflush(stdout);
+            _exit(1);
+        }
+
 
         if (execvp(cmd, argvv) < 0) {
             _exit(1);
@@ -75,12 +89,23 @@ int main(int argc, char** argv) {
         printf("Usage : %s PORT\n", argv[0]);
         FLUSH_STDOUT_EXIT(1);
     }
-    printf("Starting daemon on port %s...\n", argv[1]);
-    // TODO : UNCOMMENT
-    // if (daemon(1, 1) != 0) {
-    //     printf("Failed to start the daemon\n");
+    struct sigaction sa;
+    sa.sa_handler = handle;
+    if (sigaction(SIGTERM, &sa, NULL)) {
+        printf("Failed to set SIGTERM handler\n");
+        FLUSH_STDOUT_EXIT(1);
+    }
+    // struct sigaction sa_chld;
+    // sa.sa_handler = SIG_IGN;
+    // if (sigaction(SIGCHLD, &sa, NULL)) {
+    //     printf("Failed to set SIGTERM handler\n");
     //     FLUSH_STDOUT_EXIT(1);
     // }
+    printf("Starting daemon on port %s...\n", argv[1]);
+    if (daemon(1, 0) != 0) {
+        printf("Failed to start the daemon\n");
+        FLUSH_STDOUT_EXIT(1);
+    }
     printf("Acquiring socket...\n");
     fflush(stdout);
     int sockfd;
@@ -92,7 +117,7 @@ int main(int argc, char** argv) {
     printf("Success! Socket fd : %d\n", sockfd);
     fflush(stdout);
     int usr = -1;
-    while (true) {
+    while (!terminated) {
         printf("Awaiting connections...\n");
         fflush(stdout);
         errno = 0;
@@ -183,8 +208,12 @@ int main(int argc, char** argv) {
                 shutdown(pipe_fds[1], SHUT_WR);
                 close(pipe_fds[1]);
                 int status;
-                if (waitpid(child_pid, &status, 0) != child_pid) {
-                    printf("Failed to await the runner process with pid = %d\n", child_pid);
+                int ret_pid;
+                // if (kill(child_pid, SIGKILL) != 0) {
+                //     printf("Failed to SIGKILL %d\n", ret_pid);
+                // }
+                if ((ret_pid = waitpid(child_pid, &status, 0)) != child_pid) {
+                    printf("Failed to await the runner process with pid = %d. Got %d\n", child_pid, ret_pid);
                 }
                 else {
                     printf("Successfully terminated the runner process with pid = %d\n", child_pid);
